@@ -1,0 +1,411 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Violin & Cello Piano</title>
+
+    <script src="https://surikov.github.io/webaudiofont/npm/dist/WebAudioFontPlayer.js"></script>
+    <script src="https://surikov.github.io/webaudiofontdata/sound/0400_FluidR3_GM_sf2_file.js"></script>
+    <script src="https://surikov.github.io/webaudiofontdata/sound/0420_FluidR3_GM_sf2_file.js"></script>
+
+    <style>
+      body {
+        background: #111;
+        color: #eee;
+        font-family: monospace;
+        padding: 10px;
+      }
+
+      button {
+        margin: 4px;
+        padding: 6px 12px;
+        cursor: pointer;
+      }
+      button.active {
+        background: #2a7;
+        color: #000;
+      }
+
+      .piano {
+        position: relative;
+        height: 90px;
+        margin-bottom: 30px;
+        user-select: none;
+      }
+
+      .white {
+        position: absolute;
+        width: 16px;
+        height: 90px;
+        background: #eee;
+        border: 1px solid #333;
+        box-sizing: border-box;
+      }
+
+      .black {
+        position: absolute;
+        width: 10px;
+        height: 55px;
+        background: #000;
+        z-index: 5;
+      }
+
+      .key.active {
+        background: #4af !important;
+      }
+
+      .label {
+        position: absolute;
+        bottom: 2px;
+        width: 100%;
+        font-size: 7px;
+        text-align: center;
+        pointer-events: none;
+        color: #000;
+      }
+      .black .label {
+        color: #ccc;
+      }
+    </style>
+  </head>
+
+  <body>
+    <button id="start">Activate Audio</button><br /><br />
+
+    Sustain:
+    <input type="range" id="sustain" min="0" max="3" step="0.05" value="0.6" />
+    <span id="sustainVal">0.60s</span><br />
+
+    Vibrato:
+    <input type="range" id="vibrato" min="0" max="8" step="0.1" value="0" />
+    <span id="vibratoVal">0.0</span>
+
+    <hr />
+    <div>
+      <button id="octDown">⬇ Octave</button>
+      <span id="octaveLabel">Octave: 0</span>
+      <button id="octUp">⬆ Octave</button>
+    </div>
+    <button id="rangeBtn">🎼 Full Range</button>
+
+    <button id="violinBtn" class="active">🎻 Violin</button>
+    <button id="celloBtn">🎻 Cello</button>
+    <button id="bothBtn">🎻 Both</button>
+
+    <hr />
+
+    <h3>🎻 Violin</h3>
+    <div class="piano" id="violinPiano"></div>
+
+    <h3>🎻 Cello</h3>
+    <div class="piano" id="celloPiano"></div>
+
+    <script>
+      /* ========= AUDIO ========= */
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const player = new WebAudioFontPlayer();
+      const VIOLIN = _tone_0400_FluidR3_GM_sf2_file;
+      const CELLO = _tone_0420_FluidR3_GM_sf2_file;
+      player.loader.decodeAfterLoading(ctx, VIOLIN);
+      player.loader.decodeAfterLoading(ctx, CELLO);
+
+      start.onclick = () => ctx.resume();
+      let octaveOffset = 0;
+      let keyToMidi = {};
+
+      // G1 is MIDI 31 → find nearest white index
+
+      /* ========= STATE ========= */
+      let sustainTime = 0.6;
+      let vibratoDepth = 0;
+      let mode = "violin";
+      const activeNotes = new Map();
+
+      /* ========= UI ========= */
+      function setMode(m) {
+        mode = m;
+        violinBtn.classList.toggle("active", m === "violin");
+        celloBtn.classList.toggle("active", m === "cello");
+        bothBtn.classList.toggle("active", m === "both");
+        rebuildKeyMap();
+      }
+      violinBtn.onclick = () => setMode("violin");
+      celloBtn.onclick = () => setMode("cello");
+      bothBtn.onclick = () => setMode("both");
+
+      /* ========= CONTROLS ========= */
+      sustain.oninput = (e) => {
+        sustainTime = +e.target.value;
+        sustainVal.textContent = sustainTime.toFixed(2) + "s";
+      };
+      vibrato.oninput = (e) => {
+        vibratoDepth = +e.target.value;
+        vibratoVal.textContent = vibratoDepth.toFixed(1);
+      };
+      let rangeMode = "full"; // "full" | "real"
+
+      rangeBtn.onclick = () => {
+        rangeMode = rangeMode === "full" ? "real" : "full";
+        rangeBtn.textContent =
+          rangeMode === "full" ? "🎼 Full Range" : "🎻 Instrument Ranges";
+        rebuildKeyMap();
+      };
+      const RANGES = {
+        violin: { min: 55, max: 105 }, // G3 → A7
+        cello: { min: 36, max: 76 }, // C2 → E5
+        both: { min: 36, max: 105 },
+      };
+
+      /* ========= NOTES ========= */
+      const NOTES = [
+        "C",
+        "C#",
+        "D",
+        "D#",
+        "E",
+        "F",
+        "F#",
+        "G",
+        "G#",
+        "A",
+        "A#",
+        "B",
+      ];
+      const isBlack = (m) => [1, 3, 6, 8, 10].includes(m % 12);
+      const noteName = (m) => NOTES[m % 12] + (Math.floor(m / 12) - 1);
+
+      /* ========= KEYBOARD MAP (WHITE KEYS ONLY) ========= */
+      // Collect ALL white keys (extended upward)
+      // ALL white keys A0 (21) → C8 (108)
+      const ALL_WHITE_MIDIS = [];
+      for (let m = 21; m <= 108; m++) {
+        if (![1, 3, 6, 8, 10].includes(m % 12)) {
+          ALL_WHITE_MIDIS.push(m);
+        }
+      }
+      const keyboardKeys = [
+        "z",
+        "x",
+        "c",
+        "v",
+        "b",
+        "n",
+        "m",
+        ",",
+        ".",
+        "/",
+        "a",
+        "s",
+        "d",
+        "f",
+        "g",
+        "h",
+        "j",
+        "k",
+        "l",
+        ";",
+        "q",
+        "w",
+        "e",
+        "r",
+        "t",
+        "y",
+        "u",
+        "i",
+        "o",
+        "p",
+        "[",
+        "]",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+        "0",
+        "-",
+        "=",
+      ];
+      const BASE_WHITE_INDEX = ALL_WHITE_MIDIS.findIndex((m) => m === 31);
+
+      /* ========= AUDIO ENGINE ========= */
+      function play(inst, midi, when) {
+        const gain = ctx.createGain();
+        gain.gain.value = 1;
+        gain.connect(ctx.destination);
+
+        if (vibratoDepth > 0) {
+          const lfo = ctx.createOscillator();
+          const lfoGain = ctx.createGain();
+          lfo.frequency.value = 5.5;
+          lfoGain.gain.value = vibratoDepth * 0.03;
+          lfo.connect(lfoGain).connect(gain.gain);
+          lfo.start();
+          gain._lfo = lfo;
+        }
+
+        player.queueWaveTable(ctx, gain, inst, when, midi, 30, 0.6);
+        return gain;
+      }
+
+      function noteOn(key) {
+        if (activeNotes.has(key) || !(key in keyToMidi)) return;
+
+        const midi = keyToMidi[key];
+        const startTime = ctx.currentTime + 0.005; // 🔥 sync anchor
+        const data = [];
+
+        if (mode !== "cello") data.push(play(VIOLIN, midi, startTime));
+        if (mode !== "violin") data.push(play(CELLO, midi, startTime));
+
+        setHighlight(midi, true);
+        activeNotes.set(key, data);
+      }
+
+      function noteOff(key) {
+        const data = activeNotes.get(key);
+        if (!data) return;
+        data.forEach((g) => {
+          if (g._lfo) g._lfo.stop(ctx.currentTime + sustainTime);
+          g.gain.cancelScheduledValues(ctx.currentTime);
+          g.gain.linearRampToValueAtTime(0, ctx.currentTime + sustainTime);
+        });
+        setHighlight(keyToMidi[key], false);
+        activeNotes.delete(key);
+      }
+
+      /* ========= INPUT ========= */
+
+      window.addEventListener("keyup", (e) => noteOff(e.key));
+
+      /* ========= VISUAL ========= */
+      function setHighlight(midi, on) {
+        document
+          .querySelectorAll(`[data-midi="${midi}"]`)
+          .forEach((k) => k.classList.toggle("active", on));
+      }
+
+      /* ========= BUILD PIANO ========= */
+      function buildPiano(id) {
+        const el = document.getElementById(id);
+        el.innerHTML = "";
+        let whiteX = 0;
+        const whitePos = {};
+        for (let m = 24; m <= 119; m++) {
+          if (!isBlack(m)) {
+            const w = document.createElement("div");
+            w.className = "white key";
+            w.dataset.midi = m;
+            w.style.left = whiteX + "px";
+            w.innerHTML = `
+  <div class="label">
+    <div class="note">${noteName(m)}</div>
+    <div class="kbd"></div>
+  </div>
+`;
+
+            el.appendChild(w);
+            whitePos[m] = whiteX;
+            whiteX += 16;
+          }
+        }
+
+        for (let m = 24; m <= 119; m++) {
+          if (isBlack(m)) {
+            const prev = m - 1;
+            if (!(prev in whitePos)) continue;
+            const b = document.createElement("div");
+            b.className = "black key";
+            b.dataset.midi = m;
+            b.style.left = whitePos[prev] + 11 + "px";
+            b.innerHTML = `<div class="label">${noteName(m)}</div>`;
+            el.appendChild(b);
+          }
+        }
+      }
+      function rebuildKeyMap() {
+        keyToMidi = {};
+
+        keyboardKeys.forEach((key, i) => {
+          const idx = BASE_WHITE_INDEX + i + octaveOffset * 7;
+          let midi = ALL_WHITE_MIDIS[idx];
+          if (!midi) return;
+
+          if (rangeMode === "real") {
+            if (mode === "violin" && (midi < 55 || midi > 105)) return;
+            if (mode === "cello" && (midi < 36 || midi > 76)) return;
+            if (mode === "both") {
+              if (midi < 36 || midi > 105) return;
+            }
+          }
+
+          keyToMidi[key] = midi;
+        });
+        updateKeyLabels();
+        updateRangeVisual();
+
+        octaveLabel.textContent = `Octave: ${octaveOffset}`;
+      }
+
+      rebuildKeyMap();
+      window.addEventListener("keydown", (e) => {
+        if (e.repeat) return;
+
+        if (e.key === "`") {
+          octaveOffset = Math.max(octaveOffset - 1, -5);
+          rebuildKeyMap();
+          return;
+        }
+
+        if (e.key === "~") {
+          octaveOffset = Math.min(octaveOffset + 1, 5);
+          rebuildKeyMap();
+          return;
+        }
+
+        noteOn(e.key);
+      });
+      octDown.onclick = () => {
+        octaveOffset = Math.max(octaveOffset - 1, -5);
+        rebuildKeyMap();
+      };
+
+      octUp.onclick = () => {
+        octaveOffset = Math.min(octaveOffset + 1, 5);
+        rebuildKeyMap();
+      };
+      function updateKeyLabels() {
+        // clear all keyboard labels
+        document
+          .querySelectorAll(".kbd")
+          .forEach((el) => (el.textContent = ""));
+
+        // apply current mappings
+        for (const [key, midi] of Object.entries(keyToMidi)) {
+          document
+            .querySelectorAll(`[data-midi="${midi}"] .kbd`)
+            .forEach((el) => (el.textContent = key.toUpperCase()));
+        }
+      }
+      function updateRangeVisual() {
+        document.querySelectorAll(".key").forEach((k) => {
+          const midi = +k.dataset.midi;
+          k.classList.remove("disabled");
+
+          if (rangeMode === "real") {
+            const r = RANGES[mode];
+            if (midi < r.min || midi > r.max) {
+              k.classList.add("disabled");
+            }
+          }
+        });
+      }
+
+      buildPiano("violinPiano");
+      buildPiano("celloPiano");
+    </script>
+  </body>
+</html>
