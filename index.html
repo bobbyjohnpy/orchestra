@@ -7,6 +7,8 @@
     <script src="https://surikov.github.io/webaudiofont/npm/dist/WebAudioFontPlayer.js"></script>
     <script src="https://surikov.github.io/webaudiofontdata/sound/0400_FluidR3_GM_sf2_file.js"></script>
     <script src="https://surikov.github.io/webaudiofontdata/sound/0420_FluidR3_GM_sf2_file.js"></script>
+    <!-- <script src="https://surikov.github.io/webaudiofontdata/sound/0010_FluidR3_GM_sf2_file.js" -->
+    <script src="https://surikov.github.io/webaudiofontdata/sound/0000_FluidR3_GM_sf2_file.js"></script>
 
     <style>
       body {
@@ -66,6 +68,9 @@
       .black .label {
         color: #ccc;
       }
+      .recording {
+        outline: 3px solid red;
+      }
     </style>
   </head>
 
@@ -90,15 +95,31 @@
 
     <button id="violinBtn" class="active">🎻 Violin</button>
     <button id="celloBtn">🎻 Cello</button>
+    <button id="pianoBtn">🎹 Piano</button>
+
     <button id="bothBtn">🎻 Both</button>
+    <hr />
+    <button onclick="playLoop()">▶️ Play Loop</button>
+    <button onclick="stopLoop()">⏹ Stop</button>
+    <button onclick="clearRecordings()">🧹 Clear Recordings</button>
 
     <hr />
 
     <h3>🎻 Violin</h3>
+    <h3>
+      🎻 Violin <button onclick="toggleRecord('violin')">⏺️ Record</button>
+    </h3>
+
     <div class="piano" id="violinPiano"></div>
 
     <h3>🎻 Cello</h3>
+    <h3>🎻 Cello <button onclick="toggleRecord('cello')">⏺️ Record</button></h3>
+
     <div class="piano" id="celloPiano"></div>
+
+    <h3>🎹 Piano</h3>
+    <div class="piano" id="pianoPiano"></div>
+    <h3>🎹 Piano <button onclick="toggleRecord('piano')">⏺️ Record</button></h3>
 
     <script>
       /* ========= AUDIO ========= */
@@ -106,6 +127,9 @@
       const player = new WebAudioFontPlayer();
       const VIOLIN = _tone_0400_FluidR3_GM_sf2_file;
       const CELLO = _tone_0420_FluidR3_GM_sf2_file;
+      const PIANO = _tone_0000_FluidR3_GM_sf2_file;
+      player.loader.decodeAfterLoading(ctx, PIANO);
+
       player.loader.decodeAfterLoading(ctx, VIOLIN);
       player.loader.decodeAfterLoading(ctx, CELLO);
 
@@ -120,6 +144,20 @@
       let vibratoDepth = 0;
       let mode = "violin";
       const activeNotes = new Map();
+      const recordings = {
+        violin: [],
+        cello: [],
+        piano: [],
+      };
+
+      const recordingState = {
+        violin: false,
+        cello: false,
+        piano: false,
+      };
+
+      let loopLength = 0;
+      let recordStartTime = 0;
 
       /* ========= UI ========= */
       function setMode(m) {
@@ -127,11 +165,15 @@
         violinBtn.classList.toggle("active", m === "violin");
         celloBtn.classList.toggle("active", m === "cello");
         bothBtn.classList.toggle("active", m === "both");
+        pianoBtn.classList.toggle("active", m === "piano");
+
         rebuildKeyMap();
       }
+
       violinBtn.onclick = () => setMode("violin");
       celloBtn.onclick = () => setMode("cello");
       bothBtn.onclick = () => setMode("both");
+      pianoBtn.onclick = () => setMode("piano");
 
       /* ========= CONTROLS ========= */
       sustain.oninput = (e) => {
@@ -154,6 +196,7 @@
         violin: { min: 55, max: 105 }, // G3 → A7
         cello: { min: 36, max: 76 }, // C2 → E5
         both: { min: 36, max: 105 },
+        piano: { min: 21, max: 108 }, // A0 → C8
       };
 
       /* ========= NOTES ========= */
@@ -255,26 +298,81 @@
         if (activeNotes.has(key) || !(key in keyToMidi)) return;
 
         const midi = keyToMidi[key];
-        const startTime = ctx.currentTime + 0.005; // 🔥 sync anchor
+        const startTime = ctx.currentTime;
+
         const data = [];
 
-        if (mode !== "cello") data.push(play(VIOLIN, midi, startTime));
-        if (mode !== "violin") data.push(play(CELLO, midi, startTime));
+        if (mode === "violin") data.push(play(VIOLIN, midi, startTime));
+        if (mode === "cello") data.push(play(CELLO, midi, startTime));
+        if (mode === "both") {
+          data.push(play(VIOLIN, midi, startTime));
+          data.push(play(CELLO, midi, startTime));
+        }
+        if (mode === "piano") data.push(play(PIANO, midi, startTime));
 
+        if (recordingState[mode]) {
+          recordings[mode].push({
+            midi,
+            start: startTime - recordStartTime,
+            duration: null,
+          });
+        }
+
+        activeNotes.set(key, { data, midi, startTime });
         setHighlight(midi, true);
-        activeNotes.set(key, data);
+      }
+      function noteOff(key) {
+        const note = activeNotes.get(key);
+        if (!note) return;
+
+        const now = ctx.currentTime;
+
+        if (recordingState[mode]) {
+          const rec = recordings[mode].find(
+            (r) => r.midi === note.midi && r.duration === null,
+          );
+
+          if (rec) {
+            rec.duration = now - note.startTime + sustainTime;
+          }
+        }
+
+        note.data.forEach((g) => {
+          g.gain.linearRampToValueAtTime(0, now + sustainTime);
+        });
+
+        setHighlight(note.midi, false);
+        activeNotes.delete(key);
+      }
+      let loopTimer = null;
+
+      function playLoop() {
+        stopLoop();
+
+        const start = ctx.currentTime + 0.1;
+
+        Object.entries(recordings).forEach(([inst, notes]) => {
+          notes.forEach((n) => {
+            const instrument =
+              inst === "violin" ? VIOLIN : inst === "cello" ? CELLO : PIANO;
+
+            player.queueWaveTable(
+              ctx,
+              ctx.destination,
+              instrument,
+              start + n.start,
+              n.midi,
+              n.duration,
+              0.6,
+            );
+          });
+        });
+
+        loopTimer = setTimeout(playLoop, loopLength * 1000);
       }
 
-      function noteOff(key) {
-        const data = activeNotes.get(key);
-        if (!data) return;
-        data.forEach((g) => {
-          if (g._lfo) g._lfo.stop(ctx.currentTime + sustainTime);
-          g.gain.cancelScheduledValues(ctx.currentTime);
-          g.gain.linearRampToValueAtTime(0, ctx.currentTime + sustainTime);
-        });
-        setHighlight(keyToMidi[key], false);
-        activeNotes.delete(key);
+      function stopLoop() {
+        if (loopTimer) clearTimeout(loopTimer);
       }
 
       /* ========= INPUT ========= */
@@ -286,6 +384,12 @@
         document
           .querySelectorAll(`[data-midi="${midi}"]`)
           .forEach((k) => k.classList.toggle("active", on));
+      }
+      function clearRecordings() {
+        Object.keys(recordings).forEach((k) => (recordings[k] = []));
+        loopLength = 0;
+        stopLoop();
+        console.log("All recordings cleared");
       }
 
       /* ========= BUILD PIANO ========= */
@@ -326,6 +430,21 @@
           }
         }
       }
+      function toggleRecord(inst) {
+        recordingState[inst] = !recordingState[inst];
+
+        if (recordingState[inst]) {
+          recordings[inst] = [];
+          recordStartTime = ctx.currentTime;
+          console.log(`Recording ${inst}`);
+        } else {
+          loopLength = Math.max(loopLength, ctx.currentTime - recordStartTime);
+          console.log(`Stopped ${inst}`);
+        }
+
+        document.body.classList.toggle("recording", recordingState[inst]);
+      }
+
       function rebuildKeyMap() {
         keyToMidi = {};
 
@@ -339,6 +458,9 @@
             if (mode === "cello" && (midi < 36 || midi > 76)) return;
             if (mode === "both") {
               if (midi < 36 || midi > 105) return;
+            }
+            if (mode === "piano") {
+              if (midi < 21 || midi > 108) return;
             }
           }
 
@@ -403,6 +525,7 @@
           }
         });
       }
+      buildPiano("pianoPiano");
 
       buildPiano("violinPiano");
       buildPiano("celloPiano");
