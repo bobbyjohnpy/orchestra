@@ -71,6 +71,55 @@
       .recording {
         outline: 3px solid red;
       }
+      #timeline {
+        border: 1px solid #333;
+        background: #181818;
+        padding: 8px;
+      }
+
+      .track {
+        position: relative;
+        height: 40px;
+        margin-bottom: 6px;
+        background: #222;
+      }
+
+      .track-label {
+        position: absolute;
+        left: 4px;
+        top: 2px;
+        font-size: 10px;
+        color: #aaa;
+        z-index: 10;
+      }
+
+      .note-block {
+        position: absolute;
+        top: 14px;
+        height: 18px;
+        border-radius: 3px;
+        background: #4af;
+        opacity: 0.9;
+      }
+
+      .track.violin .note-block {
+        background: #4af;
+      }
+      .track.cello .note-block {
+        background: #7c4;
+      }
+      .track.piano .note-block {
+        background: #fa4;
+      }
+
+      .note-block {
+        cursor: grab;
+      }
+
+      .note-block.dragging {
+        opacity: 0.6;
+        cursor: grabbing;
+      }
     </style>
   </head>
 
@@ -102,6 +151,9 @@
     <button onclick="playLoop()">▶️ Play Loop</button>
     <button onclick="stopLoop()">⏹ Stop</button>
     <button onclick="clearRecordings()">🧹 Clear Recordings</button>
+    <hr />
+    <h3>🎼 Timeline</h3>
+    <div id="timeline"></div>
 
     <hr />
 
@@ -138,6 +190,7 @@
       let keyToMidi = {};
 
       // G1 is MIDI 31 → find nearest white index
+      const GROUP_THRESHOLD = 0.5; // seconds (≈ human chord timing)
 
       /* ========= STATE ========= */
       let sustainTime = 0.6;
@@ -293,6 +346,39 @@
         player.queueWaveTable(ctx, gain, inst, when, midi, 30, 0.6);
         return gain;
       }
+      const TIMELINE_SCALE = 120; // pixels per second
+      function renderTimeline() {
+        const tl = document.getElementById("timeline");
+        tl.innerHTML = "";
+
+        ["violin", "cello", "piano"].forEach((inst) => {
+          const track = document.createElement("div");
+          track.className = `track ${inst}`;
+
+          const label = document.createElement("div");
+          label.className = "track-label";
+          label.textContent = inst.toUpperCase();
+          track.appendChild(label);
+
+          const groups = groupNotes(recordings[inst]);
+
+          groups.forEach((group) => {
+            const start = Math.min(...group.map((n) => n.start));
+            const end = Math.max(...group.map((n) => n.start + n.duration));
+
+            const block = document.createElement("div");
+            block.className = "note-block";
+            block.style.left = start * TIMELINE_SCALE + "px";
+            block.style.width = (end - start) * TIMELINE_SCALE + "px";
+
+            enableGroupDrag(block, group);
+
+            track.appendChild(block);
+          });
+
+          tl.appendChild(track);
+        });
+      }
 
       function noteOn(key) {
         if (activeNotes.has(key) || !(key in keyToMidi)) return;
@@ -389,7 +475,7 @@
         Object.keys(recordings).forEach((k) => (recordings[k] = []));
         loopLength = 0;
         stopLoop();
-        console.log("All recordings cleared");
+        renderTimeline();
       }
 
       /* ========= BUILD PIANO ========= */
@@ -441,8 +527,34 @@
           loopLength = Math.max(loopLength, ctx.currentTime - recordStartTime);
           console.log(`Stopped ${inst}`);
         }
+        if (!recordingState[inst]) {
+          loopLength = Math.max(loopLength, ctx.currentTime - recordStartTime);
+          renderTimeline();
+        }
 
         document.body.classList.toggle("recording", recordingState[inst]);
+      }
+      function groupNotes(notes) {
+        const sorted = [...notes].sort((a, b) => a.start - b.start);
+        const groups = [];
+
+        let current = [];
+
+        sorted.forEach((note) => {
+          if (
+            current.length === 0 ||
+            note.start - current[0].start <= GROUP_THRESHOLD
+          ) {
+            current.push(note);
+          } else {
+            groups.push(current);
+            current = [note];
+          }
+        });
+
+        if (current.length) groups.push(current);
+
+        return groups;
       }
 
       function rebuildKeyMap() {
@@ -525,6 +637,70 @@
           }
         });
       }
+      function enableDrag(block, note) {
+        let startX = 0;
+        let originalLeft = 0;
+
+        block.addEventListener("mousedown", (e) => {
+          e.preventDefault();
+          startX = e.clientX;
+          originalLeft = note.start;
+
+          block.classList.add("dragging");
+
+          const onMove = (e) => {
+            const dx = e.clientX - startX;
+            const deltaTime = dx / TIMELINE_SCALE;
+
+            note.start = Math.max(0, originalLeft + deltaTime);
+            block.style.left = note.start * TIMELINE_SCALE + "px";
+          };
+
+          const onUp = () => {
+            block.classList.remove("dragging");
+            window.removeEventListener("mousemove", onMove);
+            window.removeEventListener("mouseup", onUp);
+          };
+
+          window.addEventListener("mousemove", onMove);
+          window.addEventListener("mouseup", onUp);
+        });
+      }
+      function enableGroupDrag(block, group) {
+        let startX = 0;
+        let originalStarts = [];
+
+        block.addEventListener("mousedown", (e) => {
+          e.preventDefault();
+
+          startX = e.clientX;
+          originalStarts = group.map((n) => n.start);
+
+          block.classList.add("dragging");
+
+          const onMove = (e) => {
+            const dx = e.clientX - startX;
+            const delta = dx / TIMELINE_SCALE;
+
+            group.forEach((note, i) => {
+              note.start = Math.max(0, originalStarts[i] + delta);
+            });
+
+            const newStart = Math.min(...group.map((n) => n.start));
+            block.style.left = newStart * TIMELINE_SCALE + "px";
+          };
+
+          const onUp = () => {
+            block.classList.remove("dragging");
+            window.removeEventListener("mousemove", onMove);
+            window.removeEventListener("mouseup", onUp);
+          };
+
+          window.addEventListener("mousemove", onMove);
+          window.addEventListener("mouseup", onUp);
+        });
+      }
+
       buildPiano("pianoPiano");
 
       buildPiano("violinPiano");
